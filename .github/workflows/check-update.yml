@@ -1,0 +1,119 @@
+name: Check for Updates
+
+on:
+  schedule:
+    - cron: "0 * * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: check-update
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  check:
+    name: Check for new upstream tags
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check for new tags
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          echo "Fetching tags from reF1nd/sing-box..."
+          TAGS=$(git ls-remote --refs --tags https://github.com/reF1nd/sing-box.git \
+            | awk '{print $2}' \
+            | sed 's|^refs/tags/||' || true)
+
+          if [ -z "$TAGS" ]; then
+            echo "No tags found in upstream"
+            exit 0
+          fi
+
+          pre_rank() {
+            case "$1" in
+              alpha) echo 0 ;;
+              beta) echo 1 ;;
+              rc) echo 2 ;;
+            esac
+          }
+
+          tag_key() {
+            local tag="$1"
+            if [[ "$tag" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)-reF1nd(\.([0-9]+))?$ ]]; then
+              printf "%08d.%08d.%08d.%08d" "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]}" "${BASH_REMATCH[5]:-0}"
+            elif [[ "$tag" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)-(alpha|beta|rc)\.([0-9]+)-reF1nd(\.([0-9]+))?$ ]]; then
+              printf "%08d.%08d.%08d.%08d.%08d.%08d" "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]}" "$(pre_rank "${BASH_REMATCH[4]}")" "${BASH_REMATCH[5]}" "${BASH_REMATCH[7]:-0}"
+            fi
+          }
+
+          latest_tag() {
+            local track="$1"
+            local rows=""
+            local tag key
+            while IFS= read -r tag; do
+              [ -n "$tag" ] || continue
+              if [ "$track" = "stable" ]; then
+                [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-reF1nd(\.[0-9]+)?$ ]] || continue
+              else
+                [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-(alpha|beta|rc)\.[0-9]+-reF1nd(\.[0-9]+)?$ ]] || continue
+              fi
+              key=$(tag_key "$tag")
+              [ -n "$key" ] || continue
+              rows+="${key} ${tag}"$'\n'
+            done
+            if [ -n "$rows" ]; then
+              printf "%s" "$rows" | sort | tail -n 1 | awk '{print $2}'
+            fi
+          }
+
+          is_newer() {
+            local candidate="$1"
+            local current="$2"
+            [ -n "$candidate" ] || return 1
+            if [ -z "$current" ]; then
+              return 0
+            fi
+            [[ "$(tag_key "$candidate")" > "$(tag_key "$current")" ]]
+          }
+
+          UPSTREAM_STABLE=$(printf "%s\n" "$TAGS" | latest_tag stable)
+          UPSTREAM_PRERELEASE=$(printf "%s\n" "$TAGS" | latest_tag prerelease)
+
+          RELEASE_TITLES=$(gh api "repos/${{ github.repository }}/releases" --paginate -q '.[].name' 2>/dev/null || true)
+          RELEASED_STABLE=$(printf "%s\n" "$RELEASE_TITLES" | latest_tag stable)
+          RELEASED_PRERELEASE=$(printf "%s\n" "$RELEASE_TITLES" | latest_tag prerelease)
+
+          echo "Latest upstream stable: ${UPSTREAM_STABLE:-none}"
+          echo "Latest released stable title: ${RELEASED_STABLE:-none}"
+          echo "Latest upstream prerelease: ${UPSTREAM_PRERELEASE:-none}"
+          echo "Latest released prerelease title: ${RELEASED_PRERELEASE:-none}"
+
+          TARGET_TAG=""
+          if is_newer "$UPSTREAM_PRERELEASE" "$RELEASED_PRERELEASE"; then
+            TARGET_TAG="$UPSTREAM_PRERELEASE"
+          elif is_newer "$UPSTREAM_STABLE" "$RELEASED_STABLE"; then
+            TARGET_TAG="$UPSTREAM_STABLE"
+          fi
+
+          if [ -z "$TARGET_TAG" ]; then
+            echo "No newer upstream tag found. Nothing to build."
+            exit 0
+          fi
+
+          IN_PROGRESS_RUNS=$(gh run list -R "${{ github.repository }}" --workflow=build.yml --status=in_progress --json databaseId -q 'length' 2>/dev/null || echo "0")
+          QUEUED_RUNS=$(gh run list -R "${{ github.repository }}" --workflow=build.yml --status=queued --json databaseId -q 'length' 2>/dev/null || echo "0")
+          ACTIVE_RUNS=$((IN_PROGRESS_RUNS + QUEUED_RUNS))
+          if [ "$ACTIVE_RUNS" -gt 0 ]; then
+            echo "Build workflow already has $ACTIVE_RUNS active run(s). Skipping trigger to avoid duplicate."
+            exit 0
+          fi
+
+          echo "New upstream tag found: $TARGET_TAG"
+          echo "Triggering build for source tag: $TARGET_TAG"
+          gh workflow run build.yml -R "${{ github.repository }}" -f source_tag="$TARGET_TAG"
+          echo "Triggered build successfully"
