@@ -376,19 +376,16 @@ jobs:
           GOAMD64: ${{ matrix.goamd64 }}
           GITHUB_TOKEN: ${{ github.token }}
 
-      - name: Clone cronet-go
-        run: |
-          $CRONET_GO_VERSION = Get-Content .github/CRONET_GO_VERSION
-          git init $HOME/cronet-go
-          git -C $HOME/cronet-go remote add origin https://github.com/sagernet/cronet-go.git
-          git -C $HOME/cronet-go fetch --depth=1 origin "$CRONET_GO_VERSION"
-          git -C $HOME/cronet-go checkout FETCH_HEAD
-
       - name: Extract libcronet.dll
         run: |
-          $env:CGO_ENABLED = "0"
-          cd $HOME/cronet-go
-          go run -v ./cmd/build-naive extract-lib --target windows/${{ matrix.goarch }} -o $env:GITHUB_WORKSPACE/dist
+          $CRONET_GO_VERSION = Get-Content .github/CRONET_GO_VERSION
+          $LIBRARY_PATH = "lib/windows_${{ matrix.goarch }}/libcronet.dll"
+          git init "$env:RUNNER_TEMP/cronet-go-lib"
+          git -C "$env:RUNNER_TEMP/cronet-go-lib" remote add origin https://github.com/sagernet/cronet-go.git
+          git -C "$env:RUNNER_TEMP/cronet-go-lib" sparse-checkout set --no-cone "/$LIBRARY_PATH"
+          git -C "$env:RUNNER_TEMP/cronet-go-lib" fetch --depth=1 --filter=blob:none origin "$CRONET_GO_VERSION"
+          git -C "$env:RUNNER_TEMP/cronet-go-lib" checkout FETCH_HEAD
+          Copy-Item "$env:RUNNER_TEMP/cronet-go-lib/$LIBRARY_PATH" $env:GITHUB_WORKSPACE/dist
 
       - name: Archive
         run: |
